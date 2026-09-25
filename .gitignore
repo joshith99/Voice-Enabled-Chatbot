@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Training leftovers (only the int8 model.onnx should ship)
+*.safetensors
+training/model/model_fp32.onnx
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Node
+node_modules/
+
+# Logs and OS cruft
+*.log
+.DS_Store

@@ -1,0 +1,7 @@
+flask
+gunicorn
+onnxruntime
+tokenizers
+numpy
+requests
+python-dotenv
