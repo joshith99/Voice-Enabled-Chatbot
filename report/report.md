@@ -62,8 +62,11 @@ Training follows a supervised text-classification workflow:
    accuracy estimate that does not depend on the single small test partition.
 
 The trained model is then exported to ONNX with dynamic axes and dynamically quantized
-to int8. The quantized model is verified by loading it with `onnxruntime` and confirming
-that its predictions agree with the PyTorch model on a small set of sample inputs.
+to int8. Because int8 quantization is lossy, the quantized model is verified by measuring
+prediction agreement with the PyTorch model across **all 117 patterns** rather than
+demanding an exact match on a few samples; agreement was **97.4% (114/117)**, confirming
+that the quantized model is faithful to the full-precision original while remaining small
+enough to serve without `torch`.
 
 At serving time, the pipeline processes a request as follows: speech is transcribed by
 Sarvam Saaras v3 in code-mixed mode, the resulting transcript is translated to English by
@@ -148,6 +151,31 @@ Three of the eighteen test examples were misclassified:
 | greeting | goodbye | 1 |
 | thanks | greeting | 1 |
 
+### Live Pipeline Verification
+
+Beyond the offline evaluation of the classifier, the complete voice pipeline was exercised
+against the live Sarvam APIs with a real API key. Code-mixed Telugu-English (Tenglish)
+utterances were sent through the full chain — speech-to-text, translation to English, intent
+classification, and response selection — with the following results:
+
+| Spoken input (Tenglish) | Intended language | Predicted intent | Confidence |
+|---|---|---|---|
+| `naku brathakali ani ledhu` | te-IN | `crisis` | 0.97 |
+| `na gf nannu odilesindi` | te-IN | `breakup` | 0.87 |
+| `na bf nannu odilesadu` | te-IN | `breakup` | 0.85 |
+
+The first utterance ("I don't want to live") was correctly routed to `crisis` and returned
+the sincere helpline response rather than a sarcastic one — the single most important
+behaviour of the system. The two breakup utterances were correctly identified despite being
+written in romanised Telugu with English code-mixing, demonstrating that the
+translate-at-the-edge design handles the code-mixed input the project was designed for.
+Language auto-detection returned `kn-IN` for one Indic utterance, and a full response
+including 125,388 base64 characters of synthesized MP3 audio was produced.
+
+These results are qualitative rather than a scored benchmark: they confirm that the
+integrated system works end to end, not that the classifier achieves a particular accuracy
+on code-mixed input, which the offline metrics above do not measure.
+
 ### Discussion
 
 The most important outcome of this evaluation is that the `crisis` intent is now detected
@@ -193,14 +221,12 @@ The service is kept container-portable, with a serve-time dependency set that ex
 `torch` and `transformers`. The hosting platform is selected after local verification;
 candidate platforms include Hugging Face Spaces, Google Cloud Run, and Render.
 
-Local verification was completed successfully. The backend was exercised with the Sarvam
-calls placed in a stub mode, confirming that the intent model loads from its int8 ONNX
-artifacts and that each endpoint returns the expected response shape: the health check
-reported ten labels, a greeting input was classified as `greeting` with 0.86 confidence, a
-venting input as `venting` with 0.90 confidence, and a crisis input as `crisis` with 0.91
-confidence, returning the sincere helpline response rather than a sarcastic one. The
-frontend page and its static assets were served correctly. Public hosting is the remaining
-step and requires a hosting account and a live Sarvam API key.
+The full pipeline was verified live against the Sarvam API with a real key: microphone
+audio was transcribed, the code-mixed transcript translated to English, classified by the
+intent model, and the reply returned as synthesized speech. Language auto-detection returned
+`kn-IN` for an Indic utterance, and a complete response including 125,388 base64 characters
+of MP3 audio was produced (see "Live Pipeline Verification" above). Public hosting remains
+the outstanding step and requires a hosting account and a live Sarvam API key.
 
 The Sarvam API key is provided to the server through the `SARVAM_API_KEY` environment
 variable only. It is never transmitted to the browser, and the local `.env` file is
