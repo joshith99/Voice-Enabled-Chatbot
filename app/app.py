@@ -96,7 +96,11 @@ def transcribe():
         return jsonify({"error": "missing 'audio' file field"}), 400
 
     try:
-        result = sarvam.transcribe(audio.read(), audio.filename or "audio.webm")
+        result = sarvam.transcribe(
+            audio.read(),
+            audio.filename or "audio.webm",
+            audio.content_type or "",
+        )
     except sarvam.SarvamError as exc:
         return jsonify({"error": f"transcription failed: {exc}"}), 502
 

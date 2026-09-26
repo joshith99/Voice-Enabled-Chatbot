@@ -5,6 +5,7 @@ key. Otherwise ``SARVAM_API_KEY`` must be set in the environment.
 """
 
 import base64
+import mimetypes
 import os
 
 import requests
@@ -59,7 +60,24 @@ def _post(url: str, **kwargs):
         raise SarvamError(f"Sarvam API {url} returned non-JSON body") from exc
 
 
-def transcribe(audio_bytes: bytes, filename: str) -> dict:
+def _audio_content_type(content_type: str, filename: str) -> str:
+    """Resolve the multipart Content-Type Sarvam should receive.
+
+    Browsers send values like ``audio/webm;codecs=opus``. Sarvam rejects any
+    type outside its allow-list with "Invalid file type", so strip parameters
+    and fall back to the filename, then to webm (what MediaRecorder produces).
+
+    Note: requests does NOT guess the type for a 2-tuple; the file part must be
+    a 3-tuple or no Content-Type is sent at all.
+    """
+    ctype = (content_type or "").split(";")[0].strip().lower()
+    if ctype.startswith("audio/") or ctype == "application/octet-stream":
+        return ctype
+    guessed = mimetypes.guess_type(filename or "")[0] or ""
+    return guessed if guessed.startswith("audio/") else "audio/webm"
+
+
+def transcribe(audio_bytes: bytes, filename: str, content_type: str = "") -> dict:
     """Speech-to-text (code-mixed). Returns {transcript, language_code}."""
     if _stub():
         return {
@@ -70,7 +88,13 @@ def transcribe(audio_bytes: bytes, filename: str) -> dict:
     data = _post(
         STT_URL,
         headers={"api-subscription-key": _key()},
-        files={"file": (filename or "audio.webm", audio_bytes)},
+        files={
+            "file": (
+                filename or "audio.webm",
+                audio_bytes,
+                _audio_content_type(content_type, filename),
+            )
+        },
         data={"model": STT_MODEL, "mode": STT_MODE},
     )
     return {
