@@ -19,6 +19,10 @@ STT_MODE = "codemix"
 TRANSLATE_MODEL = "mayura:v1"
 TTS_MODEL = "bulbul:v3"
 
+# Bulbul's own default speaker is "shubh" (male). Myra is a 31-year-old woman,
+# so pick a female voice explicitly. Overridable via TTS_SPEAKER.
+DEFAULT_SPEAKER = "priya"
+
 TIMEOUT = 60
 
 # A single MPEG-1 Layer III frame header (128 kbps, 44.1 kHz) padded to 417
@@ -121,7 +125,7 @@ def translate(text: str, source_language_code: str, target_language_code: str) -
     return data.get("translated_text", "")
 
 
-def tts(text: str, language_code: str) -> str:
+def tts(text: str, language_code: str, speaker: str = "") -> str:
     """Text-to-speech via Bulbul v3. Returns base64-encoded mp3."""
     if _stub():
         return STUB_MP3_B64
@@ -132,6 +136,7 @@ def tts(text: str, language_code: str) -> str:
         json={
             "text": text,
             "language_code": language_code or "en-IN",
+            "speaker": speaker or os.environ.get("TTS_SPEAKER") or DEFAULT_SPEAKER,
             "model": TTS_MODEL,
             "output_audio_codec": "mp3",
         },

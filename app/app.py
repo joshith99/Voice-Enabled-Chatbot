@@ -87,10 +87,15 @@ def _pop_ready(pending: list, sent_any: bool) -> str | None:
     return " ".join(pending)
 
 
-def _synth(clip: str) -> str | None:
-    """Synthesize one clip; None marks a clip whose TTS call failed."""
+def _synth(clip: str, default_language: str) -> str | None:
+    """Synthesize one clip; None marks a clip whose TTS call failed.
+
+    The language is detected per clip so a reply that mixes English and an
+    Indic language is voiced correctly in each part.
+    """
+    spoken = tts_text.strip_stage_directions(clip)
     try:
-        return sarvam.tts(tts_text.strip_stage_directions(clip), DEFAULT_LANGUAGE)
+        return sarvam.tts(spoken, tts_text.detect_language(spoken, default_language))
     except sarvam.SarvamError as exc:
         app.logger.warning("TTS failed: %s", exc)
         return None
@@ -126,19 +131,29 @@ def _fallback_frames(message: str):
     yield _sse("token", {"text": _response_for(intent)})
 
 
-def _stream(message: str, history: list):
+def _stream(message: str, history: list, language_code: str = ""):
     buffer = ""
     pending: list = []
     sent_any = False
     futures: list = []
     pool = ThreadPoolExecutor(max_workers=TTS_WORKERS)
+    # The STT language is only a fallback for a reply the model romanised
+    # instead of writing in native script. Once the reply shows Indic script,
+    # a clip without it is English, so English clips are not read by an Indic
+    # voice just because the user spoke an Indic language.
+    fallback_language = language_code or DEFAULT_LANGUAGE
+    seen_indic = False
 
     def submit(clip: str) -> None:
-        nonlocal sent_any
+        nonlocal sent_any, seen_indic
         if not clip or not tts_text.has_balanced_asterisks(clip):
             return
         sent_any = True
-        futures.append(pool.submit(_synth, clip))
+        spoken = tts_text.strip_stage_directions(clip)
+        if tts_text.has_indic_script(spoken):
+            seen_indic = True
+        default = "en-IN" if seen_indic else fallback_language
+        futures.append(pool.submit(_synth, clip, default))
 
     def flush_pending() -> None:
         nonlocal pending
@@ -234,8 +249,10 @@ def chat_stream():
     if not message:
         return jsonify({"error": "missing 'message'"}), 400
 
+    language_code = (body.get("language_code") or "").strip()
+
     return Response(
-        _stream(message, _history(body)),
+        _stream(message, _history(body), language_code),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

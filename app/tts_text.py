@@ -10,6 +10,54 @@ import re
 _SPAN_RE = re.compile(r"\*[^*]*\*")
 _MULTISPACE_RE = re.compile(r" {2,}")
 
+# Indic script blocks -> BCP-47 codes. Detected per TTS clip so a reply that
+# mixes English and Telugu is voiced in the right language for each part.
+_SCRIPT_RANGES = (
+    ("te-IN", "\u0c00", "\u0c7f"),  # Telugu
+    ("kn-IN", "\u0c80", "\u0cff"),  # Kannada
+    ("ta-IN", "\u0b80", "\u0bff"),  # Tamil
+    ("ml-IN", "\u0d00", "\u0d7f"),  # Malayalam
+    ("gu-IN", "\u0a80", "\u0aff"),  # Gujarati
+    ("pa-IN", "\u0a00", "\u0a7f"),  # Gurmukhi (Punjabi)
+    ("bn-IN", "\u0980", "\u09ff"),  # Bengali
+    ("od-IN", "\u0b00", "\u0b7f"),  # Odia
+    ("hi-IN", "\u0900", "\u097f"),  # Devanagari (Hindi/Marathi)
+)
+
+# Minimum Indic characters before a script wins; guards against one stray
+# glyph pulling an otherwise-English clip into another language.
+_SCRIPT_MIN_CHARS = 3
+
+
+def has_indic_script(text: str) -> bool:
+    """True if ``text`` contains Indic-script characters."""
+    for char in text:
+        point = ord(char)
+        for _, low, high in _SCRIPT_RANGES:
+            if ord(low) <= point <= ord(high):
+                return True
+    return False
+
+
+def detect_language(text: str, default: str = "en-IN") -> str:
+    """Pick a TTS language code from the script used in ``text``.
+
+    The persona is asked to write Indic languages in their native script, so
+    script detection is enough to voice each clip correctly. Falls back to
+    ``default`` (usually the STT-detected language) when no script dominates.
+    """
+    counts = {code: 0 for code, _, _ in _SCRIPT_RANGES}
+    for char in text:
+        point = ord(char)
+        for code, low, high in _SCRIPT_RANGES:
+            if ord(low) <= point <= ord(high):
+                counts[code] += 1
+                break
+    best = max(counts, key=lambda c: counts[c])
+    if counts[best] >= _SCRIPT_MIN_CHARS:
+        return best
+    return default or "en-IN"
+
 
 def strip_stage_directions(text: str) -> str:
     """Remove *...* spans (incl. the asterisks) for TTS. Keeps ... — ?! caps."""

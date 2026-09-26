@@ -303,7 +303,7 @@
 
   /* ---------- Chat streaming ---------- */
 
-  function streamChat(message, userLabel) {
+  function streamChat(message, userLabel, languageCode) {
     addBubble("user", userLabel || "You", message, "");
     setBusy(true);
 
@@ -353,7 +353,11 @@
     fetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: message, history: history })
+      body: JSON.stringify({
+        message: message,
+        history: history,
+        language_code: languageCode || ""
+      })
     })
       .then(function (response) {
         if (!response.ok) {
@@ -524,7 +528,7 @@
         if (data.language_code) {
           label = "You · " + languageName(data.language_code);
         }
-        streamChat(transcript, label);
+        streamChat(transcript, label, data.language_code);
       })
       .catch(function (err) {
         typing.remove();
