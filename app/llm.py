@@ -17,13 +17,19 @@ from .persona import get_system_prompt
 
 _DEFAULT_BASE_URL = "https://7api.st/v1"
 _DEFAULT_MODEL = "deepseek-v4.1-flash"
-# These are reasoning models and reasoning tokens count against max_tokens.
-# The contract's 700 is fully eaten by reasoning_content, leaving zero reply
-# (finish_reason="length", empty content). 4000 leaves room for the short
-# spoken reply while still capping it. Overridable for other models.
-_DEFAULT_MAX_TOKENS = 4000
+# The reply is short; reasoning is disabled, so this only needs headroom for
+# the metadata line plus a couple of sentences. It is a cap, not a charge, but
+# a huge cap invites rambling. Overridable via LLM_MAX_TOKENS.
+_DEFAULT_MAX_TOKENS = 1200
 _TIMEOUT = (120, 120)
 _META_RE = re.compile(r"\[\[\s*([a-z_]+)\s*\|\s*([0-9]*\.?[0-9]+)\s*\]\]")
+
+# reasoning_effort:"none" is accepted but ignored by this gateway: measured
+# 2.6k-7.8k reasoning chars per call, which both wastes billed output tokens
+# and pushed time-to-first-token to 15-60s. `thinking:{"type":"disabled"}` is
+# the parameter that actually works here (verified 0 reasoning chars across
+# repeated calls, TTFT 1.9-11.5s). Overridable with LLM_EXTRA_BODY (JSON).
+_DEFAULT_EXTRA_BODY = {"thinking": {"type": "disabled"}}
 
 
 class LLMError(RuntimeError):
@@ -121,9 +127,16 @@ def stream_chat(message: str, history: list[dict]) -> Iterator[dict]:
         + [{"role": "user", "content": message}],
         "max_tokens": int(os.environ.get("LLM_MAX_TOKENS", str(_DEFAULT_MAX_TOKENS))),
         "temperature": 0.9,
-        "reasoning_effort": "none",
         "stream": True,
     }
+    extra = os.environ.get("LLM_EXTRA_BODY")
+    if extra:
+        try:
+            body.update(json.loads(extra))
+        except json.JSONDecodeError as exc:
+            raise LLMError("LLM_EXTRA_BODY is not valid JSON: %s" % exc) from exc
+    else:
+        body.update(_DEFAULT_EXTRA_BODY)
     headers = {
         "Authorization": "Bearer " + api_key,
         "Content-Type": "application/json",
