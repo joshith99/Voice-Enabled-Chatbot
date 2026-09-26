@@ -31,6 +31,17 @@ _META_RE = re.compile(r"\[\[\s*([a-z_]+)\s*\|\s*([0-9]*\.?[0-9]+)\s*\]\]")
 # repeated calls, TTFT 1.9-11.5s). Overridable with LLM_EXTRA_BODY (JSON).
 _DEFAULT_EXTRA_BODY = {"thinking": {"type": "disabled"}}
 
+# After a long conversation the model drifts into pure dialogue and silently
+# drops the metadata line, which degrades the topic to "fallback". A rule
+# buried in a 2.5k-token system prompt loses to recency, so restate it in the
+# final user turn: measured 3/3 vs 0/3 with the prompt alone at 14 turns.
+# Appended per request only - never written into the caller's history.
+_FORMAT_REMINDER = (
+    "\n\n(Format reminder: the FIRST line of your reply must be exactly "
+    "[[topic|confidence]] - topic from the allowed list, confidence 0-1 - "
+    "followed by a newline, then your reply.)"
+)
+
 
 class LLMError(RuntimeError):
     """Raised when the LLM cannot be called at all (e.g. missing API key)."""
@@ -91,6 +102,14 @@ def _iter_sse(resp: requests.Response) -> Iterator[dict]:
 
         if not meta_done:
             buffer += content
+            # The model occasionally opens with a blank line before the
+            # metadata line; splitting on that would leave an empty "first
+            # line" and lose the topic. Drop leading newlines first.
+            lead = buffer.lstrip("\r\n")
+            if lead != buffer:
+                buffer = lead
+                if not buffer:
+                    continue
             if "\n" not in buffer:
                 continue
             first_line, rest = buffer.split("\n", 1)
@@ -124,7 +143,7 @@ def stream_chat(message: str, history: list[dict]) -> Iterator[dict]:
         "model": os.environ.get("LLM_MODEL", _DEFAULT_MODEL),
         "messages": [{"role": "system", "content": get_system_prompt()}]
         + list(history)
-        + [{"role": "user", "content": message}],
+        + [{"role": "user", "content": message + _FORMAT_REMINDER}],
         "max_tokens": int(os.environ.get("LLM_MAX_TOKENS", str(_DEFAULT_MAX_TOKENS))),
         "temperature": 0.9,
         "stream": True,

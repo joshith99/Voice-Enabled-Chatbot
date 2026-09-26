@@ -11,10 +11,18 @@
   var statusText = document.getElementById("statusText");
   var noticeEl = document.getElementById("notice");
   var newChatBtn = document.getElementById("newChatBtn");
+  var themeBtn = document.getElementById("themeBtn");
 
   var HISTORY_KEY = "myra.history.v1";
+  var THEME_KEY = "myra.theme";
   var HISTORY_LIMIT = 20;
   var greetingHTML = chatEl.innerHTML;
+
+  var SCALES_SVG =
+    '<svg class="scales" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M12 3v18"/><path d="M5 6h14"/>' +
+    '<path d="M7 6 4 13h6L7 6z"/><path d="M17 6l-3 7h6l-3-7z"/><path d="M8 21h8"/></svg>';
 
   var LANGUAGE_NAMES = {
     "en-IN": "English",
@@ -60,8 +68,17 @@
     return LANGUAGE_NAMES[code] || code;
   }
 
-  function scrollToBottom() {
-    chatEl.scrollTop = chatEl.scrollHeight;
+  function scrollToBottom(instant) {
+    /* CSS scroll-behavior is smooth, which fights a per-token scrollTop
+       assignment and makes streaming lag behind. Force an instant jump while
+       the reply streams; keep smooth for user-initiated moves. */
+    if (instant) {
+      chatEl.style.scrollBehavior = "auto";
+      chatEl.scrollTop = chatEl.scrollHeight;
+      chatEl.style.scrollBehavior = "";
+    } else {
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
   }
 
   function setStatus(text, mode) {
@@ -117,8 +134,48 @@
     return bubble;
   }
 
-  function addTypingBubble() {
-    return addBubble("bot", "Therapist", "thinking...", "");
+  /* The wait is 2-20s, so it is the product's dominant moment: an on-brand
+     motif plus an honest stage label, never a fake progress bar. */
+  function attachPending(bubble) {
+    bubble.classList.add("pending");
+
+    var row = document.createElement("div");
+    row.className = "pending-row";
+    row.innerHTML =
+      SCALES_SVG +
+      '<div class="pending-text">' +
+      '<span class="pending-stage"><span class="stage-text"></span>' +
+      '<span class="dots"><span></span><span></span><span></span></span></span>' +
+      '<span class="pending-hint"></span>' +
+      "</div>";
+    bubble.appendChild(row);
+
+    var stageTextEl = row.querySelector(".stage-text");
+    var hintEl = row.querySelector(".pending-hint");
+
+    return {
+      setStage: function (text, hint) {
+        stageTextEl.textContent = text;
+        hintEl.textContent = hint || "";
+      },
+      remove: function () {
+        bubble.classList.remove("pending");
+        row.remove();
+      }
+    };
+  }
+
+  function addPendingBubble(stage, hint) {
+    var bubble = addBubble("bot", "Therapist", "", "");
+    var pending = attachPending(bubble);
+    pending.setStage(stage, hint);
+    return {
+      bubble: bubble,
+      pending: pending,
+      remove: function () {
+        bubble.remove();
+      }
+    };
   }
 
   function renderHistoryBubble(message) {
@@ -139,10 +196,36 @@
     isBusy = busy;
     setControlsDisabled(busy);
     if (busy) {
-      setStatus("thinking...", "busy");
+      setStatus("Working…", "busy");
     } else {
       setStatus("Ready", null);
     }
+  }
+
+  /* ---------- Theme ---------- */
+
+  function applyTheme(theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+    themeBtn.setAttribute("aria-pressed", theme === "dark" ? "true" : "false");
+    themeBtn.setAttribute(
+      "aria-label",
+      theme === "dark" ? "Switch to light theme" : "Switch to dark theme"
+    );
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch (err) {
+      /* storage unavailable - theme still applies for this session */
+    }
+  }
+
+  function initTheme() {
+    var current = document.documentElement.getAttribute("data-theme");
+    if (current !== "dark" && current !== "light") {
+      var prefersDark =
+        window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      current = prefersDark ? "dark" : "light";
+    }
+    applyTheme(current);
   }
 
   function base64ToBlob(base64, type) {
@@ -306,13 +389,39 @@
   function streamChat(message, userLabel, languageCode) {
     addBubble("user", userLabel || "You", message, "");
     setBusy(true);
+    setStatus("Deliberating…", "busy");
 
     var bot = addBubble("bot", "Therapist", "", "");
     var bodyEl = bot.querySelector(".bubble-body");
+    var pending = attachPending(bot);
+    pending.setStage("Myra is deliberating", "weighing your case");
     var captionEl = null;
     var full = "";
     var gotError = false;
+    var spoke = false;
+    var renderQueued = false;
     var audioQueue = Promise.resolve();
+
+    /* Tokens arrive far faster than the browser needs to repaint, so batch
+       the rich-text reparse and the scroll into one frame. */
+    function scheduleRender() {
+      if (renderQueued) {
+        return;
+      }
+      renderQueued = true;
+      window.requestAnimationFrame(function () {
+        renderQueued = false;
+        bodyEl.innerHTML = renderRich(full);
+        scrollToBottom(true);
+      });
+    }
+
+    function beginReply() {
+      if (pending) {
+        pending.remove();
+        pending = null;
+      }
+    }
 
     function queueAudio(base64) {
       audioQueue = audioQueue.then(function () {
@@ -336,16 +445,26 @@
         setCaption("topic: " + topic + " · confidence: " + confidence);
       } else if (eventName === "token") {
         if (typeof data.text === "string") {
+          beginReply();
           full += data.text;
-          bodyEl.innerHTML = renderRich(full);
-          scrollToBottom();
+          scheduleRender();
         }
       } else if (eventName === "audio") {
         if (data.b64) {
+          if (!spoke) {
+            /* Audio trails the text, so the pending row is usually already
+               gone by now - update the status regardless of it. */
+            spoke = true;
+            setStatus("Speaking…", "busy");
+            if (pending) {
+              pending.setStage("Speaking", "");
+            }
+          }
           queueAudio(data.b64);
         }
       } else if (eventName === "error") {
         gotError = true;
+        beginReply();
         addBubble("error", "Error", data.message || "The reply stream failed.", "");
       }
     }
@@ -408,6 +527,23 @@
         return audioQueue;
       })
       .then(function () {
+        /* Flush the last batched frame before we declare the turn finished. */
+        if (renderQueued) {
+          renderQueued = false;
+          bodyEl.innerHTML = renderRich(full);
+        }
+
+        if (pending) {
+          /* The stream ended without a single token - never leave the
+             deliberation motif hanging as if it were still working. */
+          pending.remove();
+          pending = null;
+          if (!gotError) {
+            bot.remove();
+            addBubble("error", "Error", "The reply came back empty. Try again?", "");
+          }
+        }
+
         setBusy(false);
         if (gotError) {
           setStatus("Ready", "error");
@@ -506,7 +642,8 @@
     formData.append("audio", blob, "recording.webm");
 
     setBusy(true);
-    var typing = addTypingBubble();
+    setStatus("Transcribing…", "busy");
+    var pending = addPendingBubble("Transcribing your voice", "Sarvam is listening back");
 
     fetch("/api/transcribe", {
       method: "POST",
@@ -514,7 +651,7 @@
     })
       .then(parseJsonResponse)
       .then(function (data) {
-        typing.remove();
+        pending.remove();
 
         var transcript = (data.transcript || "").trim();
         if (!transcript) {
@@ -531,7 +668,7 @@
         streamChat(transcript, label, data.language_code);
       })
       .catch(function (err) {
-        typing.remove();
+        pending.remove();
         setBusy(false);
         setStatus("Ready", "error");
         addBubble("error", "Error", friendlyError(err), "");
@@ -574,6 +711,12 @@
     setStatus("Ready", null);
   });
 
+  themeBtn.addEventListener("click", function () {
+    var next =
+      document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+    applyTheme(next);
+  });
+
   window.addEventListener("storage", function (event) {
     if (event.key !== HISTORY_KEY) {
       return;
@@ -587,6 +730,8 @@
   if (history.length) {
     history.forEach(renderHistoryBubble);
   }
+
+  initTheme();
 
   if (!micAvailable) {
     micBtn.disabled = true;
