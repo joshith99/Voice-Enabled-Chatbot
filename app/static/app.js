@@ -10,6 +10,11 @@
   var statusEl = document.getElementById("status");
   var statusText = document.getElementById("statusText");
   var noticeEl = document.getElementById("notice");
+  var newChatBtn = document.getElementById("newChatBtn");
+
+  var HISTORY_KEY = "myra.history.v1";
+  var HISTORY_LIMIT = 20;
+  var greetingHTML = chatEl.innerHTML;
 
   var LANGUAGE_NAMES = {
     "en-IN": "English",
@@ -33,6 +38,7 @@
   var isBusy = false;
   var mimeType = pickMimeType();
   var micAvailable = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+  var history = loadHistory();
 
   function pickMimeType() {
     if (!window.MediaRecorder || !window.MediaRecorder.isTypeSupported) {
@@ -47,12 +53,11 @@
     return "";
   }
 
-  function languageLabel(code) {
+  function languageName(code) {
     if (!code) {
-      return "Unknown language";
+      return "Unknown";
     }
-    var name = LANGUAGE_NAMES[code] || code;
-    return name + " (" + code + ")";
+    return LANGUAGE_NAMES[code] || code;
   }
 
   function scrollToBottom() {
@@ -72,7 +77,15 @@
     noticeEl.classList.remove("hidden");
   }
 
-  function addBubble(role, label, body, caption) {
+  function renderRich(text) {
+    var escaped = text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
+    return escaped.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  }
+
+  function addBubble(role, label, body, caption, rich) {
     var bubble = document.createElement("div");
     bubble.className = "bubble " + role;
 
@@ -85,7 +98,11 @@
 
     var bodyEl = document.createElement("div");
     bodyEl.className = "bubble-body";
-    bodyEl.textContent = body;
+    if (rich) {
+      bodyEl.innerHTML = renderRich(body);
+    } else {
+      bodyEl.textContent = body;
+    }
     bubble.appendChild(bodyEl);
 
     if (caption) {
@@ -102,6 +119,14 @@
 
   function addTypingBubble() {
     return addBubble("bot", "Therapist", "thinking...", "");
+  }
+
+  function renderHistoryBubble(message) {
+    if (message.role === "user") {
+      addBubble("user", "You", message.content, "");
+    } else {
+      addBubble("bot", "Therapist", message.content, "", true);
+    }
   }
 
   function setControlsDisabled(disabled) {
@@ -130,30 +155,38 @@
   }
 
   function playBase64Audio(base64) {
-    if (!base64) {
-      return;
-    }
-    var url = null;
-    try {
-      url = URL.createObjectURL(base64ToBlob(base64, "audio/mpeg"));
-      var audio = new Audio(url);
-      audio.onended = function () {
-        URL.revokeObjectURL(url);
-      };
-      audio.onerror = function () {
-        URL.revokeObjectURL(url);
-      };
-      var playPromise = audio.play();
-      if (playPromise && typeof playPromise.catch === "function") {
-        playPromise.catch(function () {
-          showNotice("Reply audio was blocked by the browser. Click anywhere, then try again.");
-        });
+    return new Promise(function (resolve) {
+      if (!base64) {
+        resolve();
+        return;
       }
-    } catch (err) {
-      if (url) {
-        URL.revokeObjectURL(url);
+      var url = null;
+      try {
+        url = URL.createObjectURL(base64ToBlob(base64, "audio/mpeg"));
+        var audio = new Audio(url);
+        var finish = function () {
+          if (url) {
+            URL.revokeObjectURL(url);
+            url = null;
+          }
+          resolve();
+        };
+        audio.onended = finish;
+        audio.onerror = finish;
+        var playPromise = audio.play();
+        if (playPromise && typeof playPromise.catch === "function") {
+          playPromise.catch(function () {
+            showNotice("Reply audio was blocked by the browser. Click anywhere, then try again.");
+            finish();
+          });
+        }
+      } catch (err) {
+        if (url) {
+          URL.revokeObjectURL(url);
+        }
+        resolve();
       }
-    }
+    });
   }
 
   function friendlyError(err) {
@@ -172,6 +205,212 @@
       }
       return data;
     });
+  }
+
+  /* ---------- History persistence ---------- */
+
+  function loadHistory() {
+    try {
+      var raw = localStorage.getItem(HISTORY_KEY);
+      if (!raw) {
+        return [];
+      }
+      var parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+      return parsed.filter(function (message) {
+        return message &&
+          (message.role === "user" || message.role === "assistant") &&
+          typeof message.content === "string";
+      }).slice(-HISTORY_LIMIT);
+    } catch (err) {
+      return [];
+    }
+  }
+
+  function saveHistory() {
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+    } catch (err) {
+      /* storage unavailable — keep in-memory history only */
+    }
+  }
+
+  function clearHistory() {
+    history = [];
+    try {
+      localStorage.removeItem(HISTORY_KEY);
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  function rememberTurn(userText, assistantText) {
+    history.push({ role: "user", content: userText });
+    history.push({ role: "assistant", content: assistantText });
+    if (history.length > HISTORY_LIMIT) {
+      history = history.slice(history.length - HISTORY_LIMIT);
+    }
+    saveHistory();
+  }
+
+  /* ---------- SSE parsing ---------- */
+
+  function extractFrames(buffer) {
+    var frames = [];
+    var idx = buffer.indexOf("\n\n");
+    while (idx !== -1) {
+      frames.push(buffer.slice(0, idx));
+      buffer = buffer.slice(idx + 2);
+      idx = buffer.indexOf("\n\n");
+    }
+    return { frames: frames, rest: buffer };
+  }
+
+  function parseFrame(frame) {
+    var eventName = "message";
+    var dataLines = [];
+    frame.split("\n").forEach(function (line) {
+      if (!line) {
+        return;
+      }
+      if (line.indexOf("event:") === 0) {
+        eventName = line.slice(6).trim();
+      } else if (line.indexOf("data:") === 0) {
+        var value = line.slice(5);
+        if (value.charAt(0) === " ") {
+          value = value.slice(1);
+        }
+        dataLines.push(value);
+      }
+    });
+    if (!dataLines.length) {
+      return null;
+    }
+    var raw = dataLines.join("\n");
+    if (raw === "[DONE]") {
+      return { event: "done", data: {} };
+    }
+    var data;
+    try {
+      data = JSON.parse(raw);
+    } catch (err) {
+      return null;
+    }
+    return { event: eventName, data: data };
+  }
+
+  /* ---------- Chat streaming ---------- */
+
+  function streamChat(message, userLabel) {
+    addBubble("user", userLabel || "You", message, "");
+    setBusy(true);
+
+    var bot = addBubble("bot", "Therapist", "", "");
+    var bodyEl = bot.querySelector(".bubble-body");
+    var captionEl = null;
+    var full = "";
+    var gotError = false;
+    var audioQueue = Promise.resolve();
+
+    function queueAudio(base64) {
+      audioQueue = audioQueue.then(function () {
+        return playBase64Audio(base64);
+      });
+    }
+
+    function setCaption(text) {
+      if (!captionEl) {
+        captionEl = document.createElement("div");
+        captionEl.className = "bubble-caption";
+        bot.appendChild(captionEl);
+      }
+      captionEl.textContent = text;
+    }
+
+    function dispatch(eventName, data) {
+      if (eventName === "meta") {
+        var topic = data.topic || "unknown";
+        var confidence = typeof data.confidence === "number" ? data.confidence.toFixed(2) : data.confidence;
+        setCaption("topic: " + topic + " · confidence: " + confidence);
+      } else if (eventName === "token") {
+        if (typeof data.text === "string") {
+          full += data.text;
+          bodyEl.innerHTML = renderRich(full);
+          scrollToBottom();
+        }
+      } else if (eventName === "audio") {
+        if (data.b64) {
+          queueAudio(data.b64);
+        }
+      } else if (eventName === "error") {
+        gotError = true;
+        addBubble("error", "Error", data.message || "The reply stream failed.", "");
+      }
+    }
+
+    fetch("/api/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: message, history: history })
+    })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("Server error (HTTP " + response.status + ").");
+        }
+        if (!response.body || !response.body.getReader) {
+          throw new Error("Streaming is not supported in this browser.");
+        }
+
+        var reader = response.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = "";
+
+        function consume(frames) {
+          frames.forEach(function (frame) {
+            var parsed = parseFrame(frame);
+            if (parsed) {
+              dispatch(parsed.event, parsed.data);
+            }
+          });
+        }
+
+        function pump() {
+          return reader.read().then(function (result) {
+            if (result.done) {
+              buffer += decoder.decode();
+              buffer = buffer.replace(/\r/g, "");
+              consume(extractFrames(buffer).frames);
+              return;
+            }
+            buffer += decoder.decode(result.value, { stream: true });
+            buffer = buffer.replace(/\r/g, "");
+            var split = extractFrames(buffer);
+            buffer = split.rest;
+            consume(split.frames);
+            return pump();
+          });
+        }
+
+        return pump();
+      })
+      .catch(function (err) {
+        if (!gotError) {
+          addBubble("error", "Error", friendlyError(err), "");
+        }
+      })
+      .then(function () {
+        return audioQueue;
+      })
+      .then(function () {
+        setBusy(false);
+        if (gotError) {
+          setStatus("Ready", "error");
+        } else if (full.trim()) {
+          rememberTurn(message, full);
+        }
+      });
   }
 
   /* ---------- Voice flow ---------- */
@@ -273,71 +512,32 @@
       .then(function (data) {
         typing.remove();
 
-        var transcript = data.transcript || "(no speech detected)";
-        addBubble("user", "You · " + languageLabel(data.language_code), transcript, "");
-
-        if (data.english) {
-          addBubble("interpretation", "English interpretation", data.english, "");
+        var transcript = (data.transcript || "").trim();
+        if (!transcript) {
+          setBusy(false);
+          setStatus("Ready", "error");
+          addBubble("error", "Error", "I couldn't make out any words. Try again?", "");
+          return;
         }
 
-        var caption = "";
-        if (data.intent) {
-          caption = "intent: " + data.intent;
-          if (typeof data.confidence === "number") {
-            caption += " · confidence: " + data.confidence.toFixed(2);
-          }
-        }
-        addBubble("bot", "Therapist", data.response || "(no response)", caption);
-
+        var label = "You";
         if (data.language_code) {
-          setStatus("Heard " + languageLabel(data.language_code), null);
+          label = "You · " + languageName(data.language_code);
         }
-        playBase64Audio(data.audio);
+        streamChat(transcript, label);
       })
       .catch(function (err) {
         typing.remove();
-        addBubble("error", "Error", friendlyError(err), "");
-        setStatus("Ready", "error");
-      })
-      .then(function () {
         setBusy(false);
+        setStatus("Ready", "error");
+        addBubble("error", "Error", friendlyError(err), "");
       });
   }
 
   /* ---------- Text flow ---------- */
 
   function sendText(message) {
-    addBubble("user", "You", message, "");
-
-    setBusy(true);
-    var typing = addTypingBubble();
-
-    fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: message })
-    })
-      .then(parseJsonResponse)
-      .then(function (data) {
-        typing.remove();
-
-        var caption = "";
-        if (data.intent) {
-          caption = "intent: " + data.intent;
-          if (typeof data.confidence === "number") {
-            caption += " · confidence: " + data.confidence.toFixed(2);
-          }
-        }
-        addBubble("bot", "Therapist", data.response || "(no response)", caption);
-      })
-      .catch(function (err) {
-        typing.remove();
-        addBubble("error", "Error", friendlyError(err), "");
-        setStatus("Ready", "error");
-      })
-      .then(function () {
-        setBusy(false);
-      });
+    streamChat(message, "You");
   }
 
   /* ---------- Wiring ---------- */
@@ -359,6 +559,30 @@
     textInput.value = "";
     sendText(message);
   });
+
+  newChatBtn.addEventListener("click", function () {
+    if (history.length && !window.confirm("Start a new chat? This clears the conversation.")) {
+      return;
+    }
+    clearHistory();
+    chatEl.innerHTML = greetingHTML;
+    scrollToBottom();
+    setStatus("Ready", null);
+  });
+
+  window.addEventListener("storage", function (event) {
+    if (event.key !== HISTORY_KEY) {
+      return;
+    }
+    history = loadHistory();
+    chatEl.innerHTML = greetingHTML;
+    history.forEach(renderHistoryBubble);
+    scrollToBottom();
+  });
+
+  if (history.length) {
+    history.forEach(renderHistoryBubble);
+  }
 
   if (!micAvailable) {
     micBtn.disabled = true;

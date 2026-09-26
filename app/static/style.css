@@ -83,6 +83,31 @@ body {
   opacity: 0.85;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.new-chat {
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: 999px;
+  padding: 6px 14px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, transform 0.12s ease;
+}
+
+.new-chat:hover {
+  background: rgba(255, 255, 255, 0.28);
+  transform: translateY(-1px);
+}
+
 .status {
   display: inline-flex;
   align-items: center;
@@ -158,14 +183,6 @@ body {
   border-bottom-left-radius: 4px;
 }
 
-.bubble.interpretation {
-  align-self: flex-start;
-  background: var(--surface-2);
-  border: 1px dashed #c9c2ea;
-  color: #443e63;
-  font-style: italic;
-}
-
 .bubble.error {
   align-self: center;
   background: #fdecef;
@@ -189,6 +206,17 @@ body {
 
 .bubble-body {
   white-space: pre-wrap;
+}
+
+.bubble-body em {
+  font-style: italic;
+  color: var(--muted);
+  opacity: 0.9;
+}
+
+.bubble.user .bubble-body em {
+  color: #e6ddff;
+  opacity: 0.9;
 }
 
 .bubble-caption {
